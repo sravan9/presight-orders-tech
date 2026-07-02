@@ -91,7 +91,7 @@ presight-orders-tech
 
 Refer to:
 
-**📄 architecture.md**
+https://github.com/sravan9/presight-orders-tech/blob/main/docs/architecture.md
 
 The document contains:
 
@@ -373,4 +373,4 @@ Health endpoint:
 
 **Sravan Kumar Sajja**
 
-Senior Software Engineer | Java | Spring Boot | Distributed Systems | Kubernetes
+Senior Software Engineer
