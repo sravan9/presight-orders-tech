@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: inventory-config
+  namespace: presight
+data:
+  INVENTORY_LOW_STOCK_THRESHOLD: "10"
+  application.yml: |
+    inventory:
+      low-stock-threshold: 10
