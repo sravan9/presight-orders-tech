@@ -23,7 +23,7 @@ spring:
 
 inventory:
   service:
-    url: http://localhost:8082
+    url: ${INVENTORY_SERVICE_URL:http://localhost:8082}
 
 springdoc:
   api-docs:
