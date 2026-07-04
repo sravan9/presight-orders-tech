@@ -2,6 +2,17 @@
 
 A cloud-native **Order & Inventory Management System** built using **Spring Boot**, **Spring Cloud**, and **Kubernetes**. The project demonstrates how to design highly available, scalable, and resilient microservices while maintaining data consistency across distributed services using the **Saga Pattern** with compensating transactions.
 
+---
+
+## Contributors
+
+| Contributor | Responsibilities |
+|-------------|-----------------|
+| **Sravan Kumar Sajja** (Project Owner) | End-to-end system architecture design and implementation. Full ownership of business logic, Saga pattern orchestration with compensating transactions, idempotent inventory operations, atomic stock deduction with optimistic locking, concurrency failure handling, Docker Compose orchestration, Kubernetes deployment manifests, and CI/CD-ready project structure. Sole architect and developer driving all technical decisions and code quality. |
+| AI Agent | Assisted with unit test scaffolding and README documentation enhancements. |
+
+---
+
 ## Architecture
 
 The system consists of three core microservices:

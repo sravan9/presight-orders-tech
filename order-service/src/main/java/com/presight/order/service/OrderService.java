@@ -5,6 +5,7 @@ import com.presight.order.dto.CreateOrderRequest;
 import com.presight.order.dto.OrderResponse;
 import com.presight.order.entity.Order;
 import com.presight.order.entity.OrderStatus;
+import com.presight.order.exception.InventoryDeductionFailedException;
 import com.presight.order.exception.InventoryRestoreFailedException;
 import com.presight.order.exception.OrderNotFoundException;
 import com.presight.order.repository.OrderRepository;
@@ -40,10 +41,10 @@ public class OrderService {
         if (!deducted) {
             // Inventory deduction failed — mark as FAILED (no compensation needed)
             order.setStatus(OrderStatus.FAILED);
-            order = orderRepository.save(order);
+            orderRepository.save(order);
             log.warn("Order {} failed - inventory deduction failed for product={}, qty={}",
                     orderId, request.getProductCode(), request.getQuantity());
-            return toResponse(order);
+            throw new InventoryDeductionFailedException(request.getProductCode(), request.getQuantity());
         }
 
         // Step 3: Mark order as CONFIRMED — with compensation if local save fails
@@ -92,13 +93,13 @@ public class OrderService {
     }
 
     @Transactional
-    public OrderResponse updateOrderStatus(Long id, OrderStatus newStatus) {
+    public OrderResponse cancelOrder(Long id) {
         Order order = orderRepository.findById(id)
                 .orElseThrow(() -> new OrderNotFoundException(id));
 
         OrderStatus oldStatus = order.getStatus();
 
-        if (newStatus == OrderStatus.CANCELLED && oldStatus == OrderStatus.CONFIRMED) {
+        if (oldStatus == OrderStatus.CONFIRMED) {
             // Restore inventory FIRST — only cancel if restore succeeds.
             // The orderId is passed as idempotency key — if this cancel is called twice
             // (e.g., user double-clicks, network retry), inventory will NOT restore twice.
@@ -117,11 +118,17 @@ public class OrderService {
                 log.error("Failed to restore stock during cancellation of order {}", id);
                 throw new InventoryRestoreFailedException(id, order.getProductCode());
             }
+        } else if (oldStatus == OrderStatus.CANCELLED) {
+            throw new IllegalStateException("Order " + id + " is already cancelled");
+        } else if (oldStatus == OrderStatus.FAILED) {
+            throw new IllegalStateException("Order " + id + " has failed and cannot be cancelled");
+        } else if (oldStatus == OrderStatus.PENDING) {
+            throw new IllegalStateException("Order " + id + " is still pending and cannot be cancelled");
         }
 
-        order.setStatus(newStatus);
+        order.setStatus(OrderStatus.CANCELLED);
         order = orderRepository.save(order);
-        log.info("Order {} status changed from {} to {}", id, oldStatus, newStatus);
+        log.info("Order {} cancelled (was {})", id, oldStatus);
         return toResponse(order);
     }
 

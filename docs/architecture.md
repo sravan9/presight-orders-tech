@@ -56,89 +56,331 @@
 
 ## System Architecture
 
+```mermaid
+graph TB
+    Client[Clients]
+    LB[LoadBalancer Service :80]
+    GW[API Gateway<br/>Spring Cloud Gateway<br/>Port 8080<br/>2 replicas]
+    OS[Order Service<br/>Port 8081<br/>2 replicas]
+    IS[Inventory Service<br/>Port 8082<br/>2 replicas]
+    CM[ConfigMap<br/>low-stock-threshold=10]
+    ODB[(Order DB<br/>H2 In-Memory)]
+    IDB[(Inventory DB<br/>H2 In-Memory)]
+
+    Client --> LB
+    LB --> GW
+    GW -->|/api/orders/**| OS
+    GW -->|/api/inventory/**| IS
+    OS -->|REST: deduct/restore| IS
+    CM -.->|config injection| IS
+    OS --- ODB
+    IS --- IDB
+
+    subgraph Kubernetes Cluster
+        GW
+        OS
+        IS
+        CM
+        ODB
+        IDB
+        LB
+    end
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        Kubernetes Cluster                             │
-│                                                                       │
-│  ┌──────────────────┐                                                │
-│  │   ConfigMap       │                                                │
-│  │ (low-stock-      │                                                │
-│  │  threshold=10)   │                                                │
-│  └────────┬─────────┘                                                │
-│           │                                                           │
-│  ┌────────▼─────────┐    ┌─────────────────┐    ┌────────────────┐  │
-│  │  API Gateway      │    │  Order Service   │    │ Inventory Svc  │  │
-│  │  (2 replicas)     │───▶│  (2 replicas)    │───▶│ (2 replicas)   │  │
-│  │  Port: 8080       │    │  Port: 8081      │    │ Port: 8082     │  │
-│  │                   │───▶│                  │    │                │  │
-│  └────────▲──────────┘    └──────────────────┘    └────────────────┘  │
-│           │                                                           │
-│  ┌────────┴─────────┐                                                │
-│  │  LoadBalancer     │                                                │
-│  │  Service (:80)    │                                                │
-│  └────────▲──────────┘                                                │
-└───────────┼──────────────────────────────────────────────────────────┘
-            │
-     ┌──────┴──────┐
-     │   Clients    │
-     └─────────────┘
-```
+
+---
 
 ## Service Communication Flow
 
-```
-Client
-  │
-  ▼
-API Gateway (Spring Cloud Gateway, :8080)
-  │
-  ├──── /api/orders/**  ────▶  Order Service (:8081)
-  │                                    │
-  │                                    │ REST: POST /api/inventory/deduct
-  │                                    │ REST: POST /api/inventory/restore
-  │                                    ▼
-  └──── /api/inventory/** ──▶  Inventory Service (:8082)
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant GW as API Gateway :8080
+    participant OS as Order Service :8081
+    participant IS as Inventory Service :8082
+
+    C->>GW: POST /api/orders
+    GW->>OS: Route request
+    OS->>OS: Save order (PENDING)
+    OS->>IS: POST /api/inventory/deduct
+    IS->>IS: Validate stock & deduct atomically
+    IS-->>OS: 200 OK (success)
+    OS->>OS: Update order → CONFIRMED
+    OS-->>GW: 201 Created
+    GW-->>C: Order Response
+
+    Note over C,IS: Direct inventory access also routed via Gateway
+    C->>GW: GET /api/inventory/{productCode}
+    GW->>IS: Route request
+    IS-->>GW: Inventory details
+    GW-->>C: Response
 ```
 
 ## Data Consistency Strategy
 
 ### Saga Pattern (Choreography-based)
 
-```
-Order Creation Flow:
-1. Client → POST /api/orders
-2. Order Service saves order (status=PENDING), obtains orderId
-3. Order Service → POST /api/inventory/deduct { productCode, quantity, orderId }
-   └─ orderId acts as idempotency key (safe to retry)
-4a. SUCCESS: Order status → CONFIRMED
-4b. DEDUCT FAILED: Order status → FAILED (no compensation needed)
-4c. CONFIRM SAVE FAILED: Compensate → POST /api/inventory/restore (orderId)
-    └─ If restore also fails → order stays inconsistent → see Background Job below
+---
 
-Order Cancellation Flow:
-1. Client → PUT /api/orders/{id}/status?status=CANCELLED
-2. If order was CONFIRMED:
-   - Order Service → POST /api/inventory/restore?orderId={id}
-     └─ orderId ensures cancel retries don't double-restore
-   - SUCCESS: Order status → CANCELLED
-   - FAILURE: Order stays CONFIRMED (consistent) → client can retry later
+### Flow 1: Order Creation — Happy Path
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant OS as Order Service
+    participant ODB as Order DB
+    participant IS as Inventory Service
+    participant IDB as Inventory DB
+
+    C->>OS: POST /api/orders {productCode, quantity}
+    OS->>ODB: INSERT order (status=PENDING)
+    ODB-->>OS: orderId generated
+    OS->>IS: POST /api/inventory/deduct {productCode, quantity, orderId}
+    IS->>IDB: Check stock_reservations (orderId, DEDUCT)
+    Note over IS,IDB: No existing reservation → proceed
+    IS->>IDB: Deduct stock (optimistic lock check)
+    IS->>IDB: INSERT stock_reservations (orderId, DEDUCT)
+    IS-->>OS: 200 OK
+    OS->>ODB: UPDATE order SET status=CONFIRMED
+    OS-->>C: 201 Created (status=CONFIRMED)
 ```
+
+---
+
+### Flow 2: Order Creation — Insufficient Stock (No Compensation Needed)
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant OS as Order Service
+    participant ODB as Order DB
+    participant IS as Inventory Service
+
+    C->>OS: POST /api/orders {productCode, quantity}
+    OS->>ODB: INSERT order (status=PENDING)
+    ODB-->>OS: orderId generated
+    OS->>IS: POST /api/inventory/deduct {productCode, quantity, orderId}
+    IS-->>OS: 409 Conflict (insufficient stock)
+    OS->>ODB: UPDATE order SET status=FAILED
+    OS-->>C: 409 Conflict (INVENTORY_DEDUCTION_FAILED)
+    Note over OS: No compensation needed — stock was never deducted
+```
+
+---
+
+### Flow 3: Order Creation — Confirmation Save Fails (Compensation Triggered)
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant OS as Order Service
+    participant ODB as Order DB
+    participant IS as Inventory Service
+
+    C->>OS: POST /api/orders {productCode, quantity}
+    OS->>ODB: INSERT order (status=PENDING)
+    ODB-->>OS: orderId generated
+    OS->>IS: POST /api/inventory/deduct {productCode, quantity, orderId}
+    IS-->>OS: 200 OK (stock deducted)
+    OS->>ODB: UPDATE order SET status=CONFIRMED
+    ODB--xOS: ❌ DB write fails (timeout, constraint, etc.)
+    
+    rect rgb(255, 230, 230)
+        Note over OS,IS: COMPENSATING TRANSACTION
+        OS->>IS: POST /api/inventory/restore {productCode, quantity, orderId}
+        IS-->>OS: 200 OK (stock restored)
+    end
+    
+    OS->>ODB: UPDATE order SET status=FAILED
+    OS-->>C: 500 Internal Server Error
+```
+
+---
+
+### Flow 4: Double Failure — Compensation Also Fails (Requires Reconciliation)
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant OS as Order Service
+    participant ODB as Order DB
+    participant IS as Inventory Service
+
+    C->>OS: POST /api/orders {productCode, quantity}
+    OS->>ODB: INSERT order (status=PENDING)
+    ODB-->>OS: orderId generated
+    OS->>IS: POST /api/inventory/deduct {productCode, quantity, orderId}
+    IS-->>OS: 200 OK (stock deducted)
+    OS->>ODB: UPDATE order SET status=CONFIRMED
+    ODB--xOS: ❌ DB write fails
+
+    rect rgb(255, 200, 200)
+        Note over OS,IS: COMPENSATION ATTEMPT
+        OS->>IS: POST /api/inventory/restore {productCode, quantity, orderId}
+        IS--xOS: ❌ Network timeout / Service down
+    end
+
+    Note over OS: CRITICAL: Stock deducted but order not confirmed
+    Note over OS: Logged as CRITICAL for reconciliation worker
+    OS->>ODB: UPDATE order SET status=FAILED
+    OS-->>C: 500 Internal Server Error
+
+    rect rgb(255, 255, 200)
+        Note over OS,IS: BACKGROUND RECONCILIATION (async)
+        Note over OS: Sweeper queries PENDING/FAILED orders > 5 min old
+        Note over OS: Checks stock_reservations for orphaned DEDUCTs
+        OS->>IS: POST /api/inventory/restore {orderId} (retry)
+        IS-->>OS: 200 OK (idempotent — safe to retry)
+    end
+```
+
+---
+
+### Flow 5: Order Cancellation — Happy Path
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant OS as Order Service
+    participant ODB as Order DB
+    participant IS as Inventory Service
+    participant IDB as Inventory DB
+
+    C->>OS: PUT /api/orders/{id}/cancel
+    OS->>ODB: SELECT order WHERE id={id}
+    ODB-->>OS: order (status=CONFIRMED)
+    OS->>IS: POST /api/inventory/restore {productCode, quantity, orderId}
+    IS->>IDB: Check stock_reservations (orderId, RESTORE)
+    Note over IS,IDB: No existing restore → proceed
+    IS->>IDB: Restore stock (optimistic lock)
+    IS->>IDB: INSERT stock_reservations (orderId, RESTORE)
+    IS-->>OS: 200 OK
+    OS->>ODB: UPDATE order SET status=CANCELLED
+    OS-->>C: 200 OK (status=CANCELLED)
+```
+
+---
+
+### Flow 6: Order Cancellation — Restore Fails (Order Stays Consistent)
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant OS as Order Service
+    participant ODB as Order DB
+    participant IS as Inventory Service
+
+    C->>OS: PUT /api/orders/{id}/cancel
+    OS->>ODB: SELECT order WHERE id={id}
+    ODB-->>OS: order (status=CONFIRMED)
+    OS->>IS: POST /api/inventory/restore {productCode, quantity, orderId}
+    IS--xOS: ❌ Service unavailable / timeout
+
+    rect rgb(230, 255, 230)
+        Note over OS: Order stays CONFIRMED (consistent state)
+        Note over OS: Stock stays deducted (no partial mutation)
+        Note over OS: Client can safely retry cancellation later
+    end
+
+    OS-->>C: 409 Conflict (INVENTORY_RESTORE_FAILED)
+```
+
+---
+
+### Flow 7: Idempotent Retry — Duplicate Deduction Safely Skipped
+
+```mermaid
+sequenceDiagram
+    participant OS as Order Service
+    participant IS as Inventory Service
+    participant IDB as Inventory DB
+
+    Note over OS: Network timeout on first attempt (response lost)
+    OS->>IS: POST /api/inventory/deduct {productCode, qty, orderId=42}
+    IS->>IDB: Check stock_reservations WHERE orderId=42 AND type=DEDUCT
+    IDB-->>IS: ✅ Record exists (already processed)
+    Note over IS: Idempotency check passes — skip deduction
+    IS-->>OS: 200 OK (treated as success)
+    Note over OS: Safe — no double deduction occurred
+```
+
+---
+
+### Flow 8: Concurrent Deductions — Optimistic Locking
+
+```mermaid
+sequenceDiagram
+    participant R1 as Request 1
+    participant R2 as Request 2
+    participant IS as Inventory Service
+    participant DB as Product Table
+
+    R1->>IS: deduct(PROD-001, qty=5, orderId=10)
+    R2->>IS: deduct(PROD-001, qty=3, orderId=11)
+    IS->>DB: SELECT * FROM product WHERE code='PROD-001' (version=1)
+    IS->>DB: SELECT * FROM product WHERE code='PROD-001' (version=1)
+    IS->>DB: UPDATE product SET stock=95, version=2 WHERE version=1
+    DB-->>IS: ✅ Success (R1 wins)
+    IS->>DB: UPDATE product SET stock=97, version=2 WHERE version=1
+    DB--xIS: ❌ OptimisticLockException (R2 stale version)
+
+    rect rgb(230, 240, 255)
+        Note over R2,IS: SPRING RETRY (exponential backoff)
+        IS->>DB: SELECT * FROM product WHERE code='PROD-001' (version=2)
+        IS->>DB: UPDATE product SET stock=90, version=3 WHERE version=2
+        DB-->>IS: ✅ Success (R2 retried)
+    end
+
+    IS-->>R1: 200 OK
+    IS-->>R2: 200 OK
+```
+
+---
+
+### Order State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING: Order created
+    PENDING --> CONFIRMED: Inventory deducted successfully
+    PENDING --> FAILED: Inventory deduction failed
+    CONFIRMED --> CANCELLED: Cancel + inventory restored
+    FAILED --> [*]: Terminal state
+    CANCELLED --> [*]: Terminal state
+
+    note right of PENDING: orderId assigned<br/>Idempotency key established
+    note right of CONFIRMED: Stock deducted<br/>Reservation recorded
+    note left of FAILED: No stock deducted<br/>OR compensation completed
+    note right of CANCELLED: Stock restored<br/>Restore reservation recorded
+```
+
+---
 
 ### Idempotency Mechanism
 
+```mermaid
+erDiagram
+    STOCK_RESERVATIONS {
+        Long id PK
+        Long order_id
+        String product_code
+        Int quantity
+        String operation_type "DEDUCT or RESTORE"
+    }
+
+    PRODUCT {
+        Long id PK
+        String product_code UK
+        String name
+        Int available_quantity
+        Int version "Optimistic lock"
+    }
+
+    STOCK_RESERVATIONS }o--|| PRODUCT : references
 ```
-┌──────────────────────────────────────────────────────────┐
-│               stock_reservations table                     │
-├──────────┬─────────────┬──────────┬──────────────────────┤
-│ order_id │ product_code│ quantity │ operation_type        │
-├──────────┼─────────────┼──────────┼──────────────────────┤
-│    1     │  PROD-001   │    2     │ DEDUCT                │
-│    3     │  PROD-002   │    1     │ DEDUCT                │
-│    3     │  PROD-002   │    1     │ RESTORE               │
-└──────────┴─────────────┴──────────┴──────────────────────┘
-Unique constraint: (order_id, operation_type)
-→ Duplicate deduct/restore for same orderId is silently skipped
-```
+
+**Unique constraint:** `(order_id, operation_type)`
+- Duplicate deduct/restore for the same orderId is silently skipped
+- Ensures at-most-once semantics for each operation per order
 
 ---
 
@@ -209,7 +451,7 @@ docker-compose up --build
 |--------|----------|-------------|
 | POST | /api/orders | Create new order (body: `{productCode, quantity}`) |
 | GET | /api/orders/{id} | Get order by ID |
-| PUT | /api/orders/{id}/status?status=X | Update order status (CANCELLED) |
+| PUT | /api/orders/{id}/cancel | Cancel a confirmed order (restores inventory) |
 
 ### Inventory Service (via Gateway at :8080)
 | Method | Endpoint | Description |

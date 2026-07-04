@@ -4,6 +4,7 @@ import com.presight.order.client.InventoryClient;
 import com.presight.order.dto.CreateOrderRequest;
 import com.presight.order.dto.OrderResponse;
 import com.presight.order.entity.OrderStatus;
+import com.presight.order.exception.InventoryDeductionFailedException;
 import com.presight.order.exception.InventoryRestoreFailedException;
 import com.presight.order.service.OrderService;
 import org.junit.jupiter.api.Test;
@@ -46,10 +47,7 @@ class OrderServiceApplicationTests {
         when(inventoryClient.deductStock(anyString(), anyInt(), anyLong())).thenReturn(false);
 
         CreateOrderRequest request = new CreateOrderRequest("PROD-001", 100);
-        OrderResponse response = orderService.createOrder(request);
-
-        assertNotNull(response);
-        assertEquals(OrderStatus.FAILED, response.getStatus());
+        assertThrows(InventoryDeductionFailedException.class, () -> orderService.createOrder(request));
     }
 
     @Test
@@ -65,15 +63,15 @@ class OrderServiceApplicationTests {
     }
 
     @Test
-    void testUpdateOrderStatus() {
+    void testCancelOrder() {
         when(inventoryClient.deductStock(anyString(), anyInt(), anyLong())).thenReturn(true);
         when(inventoryClient.restoreStock(anyString(), anyInt(), anyLong())).thenReturn(true);
 
         CreateOrderRequest request = new CreateOrderRequest("PROD-003", 1);
         OrderResponse created = orderService.createOrder(request);
 
-        OrderResponse updated = orderService.updateOrderStatus(created.getId(), OrderStatus.CANCELLED);
-        assertEquals(OrderStatus.CANCELLED, updated.getStatus());
+        OrderResponse cancelled = orderService.cancelOrder(created.getId());
+        assertEquals(OrderStatus.CANCELLED, cancelled.getStatus());
     }
 
     @Test
@@ -86,7 +84,7 @@ class OrderServiceApplicationTests {
         assertEquals(OrderStatus.CONFIRMED, created.getStatus());
 
         assertThrows(InventoryRestoreFailedException.class,
-                () -> orderService.updateOrderStatus(created.getId(), OrderStatus.CANCELLED));
+                () -> orderService.cancelOrder(created.getId()));
 
         // Verify order is still CONFIRMED (not cancelled) - consistency maintained
         OrderResponse afterFail = orderService.getOrder(created.getId());
