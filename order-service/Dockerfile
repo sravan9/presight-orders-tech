@@ -1,9 +1,11 @@
 FROM maven:3.9-eclipse-temurin-17 AS build
 WORKDIR /app
 COPY pom.xml ./pom.xml
+COPY inventory-service/pom.xml ./inventory-service/pom.xml
 COPY order-service/pom.xml ./order-service/pom.xml
+COPY api-gateway/pom.xml ./api-gateway/pom.xml
 COPY order-service/src ./order-service/src
-RUN mvn clean package -DskipTests -pl order-service -am
+RUN mvn clean package -DskipTests -pl order-service
 
 FROM eclipse-temurin:17-jre-alpine
 WORKDIR /app
