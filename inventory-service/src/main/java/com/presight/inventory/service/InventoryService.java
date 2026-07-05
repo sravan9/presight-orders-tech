@@ -11,6 +11,8 @@ import com.presight.inventory.repository.ProductRepository;
 import com.presight.inventory.repository.StockReservationRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.List;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.retry.annotation.Backoff;
 import org.springframework.retry.annotation.Retryable;
@@ -32,6 +34,16 @@ public class InventoryService {
         this.productRepository = productRepository;
         this.stockReservationRepository = stockReservationRepository;
         this.inventoryConfig = inventoryConfig;
+    }
+
+    public List<InventoryResponse> getAllProducts() {
+        return productRepository.findAll().stream()
+                .map(product -> new InventoryResponse(
+                        product.getProductCode(),
+                        product.getName(),
+                        product.getStock(),
+                        product.getStock() <= inventoryConfig.getLowStockThreshold()))
+                .toList();
     }
 
     public InventoryResponse getInventory(String productCode) {
