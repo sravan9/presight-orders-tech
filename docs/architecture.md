@@ -109,9 +109,19 @@ sequenceDiagram
     GW-->>C: Order Response
 
     Note over C,IS: Direct inventory access also routed via Gateway
+    C->>GW: GET /api/inventory
+    GW->>IS: Route request
+    IS-->>GW: List of all products with stock
+    GW-->>C: Response
+
     C->>GW: GET /api/inventory/{productCode}
     GW->>IS: Route request
     IS-->>GW: Inventory details
+    GW-->>C: Response
+
+    C->>GW: GET /api/orders
+    GW->>OS: Route request
+    OS-->>GW: List of all orders
     GW-->>C: Response
 ```
 
@@ -449,6 +459,7 @@ docker-compose up --build
 ### Order Service (via Gateway at :8080)
 | Method | Endpoint | Description |
 |--------|----------|-------------|
+| GET | /api/orders | List all orders |
 | POST | /api/orders | Create new order (body: `{productCode, quantity}`) |
 | GET | /api/orders/{id} | Get order by ID |
 | PUT | /api/orders/{id}/cancel | Cancel a confirmed order (restores inventory) |
@@ -456,6 +467,7 @@ docker-compose up --build
 ### Inventory Service (via Gateway at :8080)
 | Method | Endpoint | Description |
 |--------|----------|-------------|
+| GET | /api/inventory | List all products with stock |
 | GET | /api/inventory/{productCode} | Get stock info |
 | POST | /api/inventory/deduct | Deduct stock (body: `{productCode, quantity, orderId}`) |
 | POST | /api/inventory/restore?productCode=X&quantity=N&orderId=M | Restore stock (idempotent) |

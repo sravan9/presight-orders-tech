@@ -24,14 +24,17 @@ The system consists of three core microservices:
 
 * **Order Service**
 
-  * Create, retrieve, and update orders
+  * Create, retrieve, list, and cancel orders
   * Manage order lifecycle (`PENDING → CONFIRMED → CANCELLED / FAILED`)
+  * Input validation (productCode required, quantity ≥ 1)
   * Coordinates inventory reservation and restoration
 
 * **Inventory Service**
 
   * Maintain product inventory
+  * List all products with stock levels
   * Atomic stock deduction and restoration
+  * Input validation (productCode required, quantity ≥ 1)
   * Configurable low-stock threshold
   * Idempotent inventory operations
   * Optimistic locking to prevent overselling
@@ -48,6 +51,7 @@ The detailed architecture, deployment topology, and design decisions are availab
 * Saga Pattern with compensating transactions
 * Idempotent inventory operations
 * Optimistic locking for concurrent inventory updates
+* Input validation with Bean Validation (Jakarta)
 * Dynamic configuration using Kubernetes ConfigMap
 * Dockerized services
 * Kubernetes deployment manifests
