@@ -14,6 +14,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.List;
+
 @Service
 public class OrderService {
 
@@ -25,6 +27,14 @@ public class OrderService {
     public OrderService(OrderRepository orderRepository, InventoryClient inventoryClient) {
         this.orderRepository = orderRepository;
         this.inventoryClient = inventoryClient;
+    }
+
+    public List<OrderResponse> getAllOrders() {
+        return orderRepository.findAll().stream()
+                .map(order -> new OrderResponse(
+                        order.getId(), order.getProductCode(), order.getQuantity(),
+                        order.getStatus(), order.getCreatedAt(), order.getUpdatedAt()))
+                .toList();
     }
 
     public OrderResponse createOrder(CreateOrderRequest request) {
